@@ -4,16 +4,16 @@ import httpx
 
 HEADERS = {"User-Agent": "WayScout/1.0 (student project)"}
 PHOTON = "https://photon.komoot.io/api/"
+NOMINATIM = "https://nominatim.openstreetmap.org/search"
 OSRM = "https://router.project-osrm.org"   # public demo server: light use only
 ROAD_FACTOR, FALLBACK_KMH = 1.3, 30
 
 
-async def geocode(q, lat=None, lng=None, limit=6):
-    """Search-as-you-type places via Photon, biased towards the user's location."""
+async def _photon(q, lat, lng, limit):
     params = {"q": q, "limit": limit}
     if lat is not None and lng is not None:
         params.update(lat=lat, lon=lng)
-    async with httpx.AsyncClient(timeout=10, headers=HEADERS) as c:
+    async with httpx.AsyncClient(timeout=8, headers=HEADERS) as c:
         r = await c.get(PHOTON, params=params)
         r.raise_for_status()
     out = []
@@ -27,6 +27,30 @@ async def geocode(q, lat=None, lng=None, limit=6):
                 parts.append(x)
         out.append({"name": name, "label": ", ".join(parts), "lat": la, "lng": lon})
     return out
+
+
+async def _nominatim(q, lat, lng, limit):
+    params = {"q": q, "format": "jsonv2", "limit": limit, "addressdetails": 0}
+    if lat is not None and lng is not None:
+        d = 0.5  # bias results to ~50 km around the user
+        params.update(viewbox=f"{lng - d},{lat + d},{lng + d},{lat - d}")
+    async with httpx.AsyncClient(timeout=10, headers=HEADERS) as c:
+        r = await c.get(NOMINATIM, params=params)
+        r.raise_for_status()
+    return [{"name": it.get("name") or it["display_name"].split(",")[0],
+             "label": it["display_name"],
+             "lat": float(it["lat"]), "lng": float(it["lon"])} for it in r.json()]
+
+
+async def geocode(q, lat=None, lng=None, limit=6):
+    """Place search: Photon first, falling back to Nominatim if Photon is unavailable."""
+    try:
+        res = await _photon(q, lat, lng, limit)
+        if res:
+            return res
+    except Exception as e:
+        print("Photon failed:", repr(e))
+    return await _nominatim(q, lat, lng, limit)
 
 
 def _haversine_km(a, b):
